@@ -1,0 +1,43 @@
+{
+    // VS Code launch configurations for this diffusion estimator workspace.
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            // Run the arrival-time contour script with the maize example and satellite imagery.
+            "name": "Plot Arrival-Time Contours",
+            // Use the Python debugger provided by the VS Code Python extension.
+            "type": "debugpy",
+            // Start a new debug process for the plotting script.
+            "request": "launch",
+            // Point directly to the repository plotting entry point.
+            "program": "${workspaceFolder}/plotting/plot_arrival_time_contours.py",
+            // Keep the working directory at the repository root for data and output paths.
+            "cwd": "${workspaceFolder}",
+            // Select the crop, layer, and optional Esri World Imagery background.
+            "args": [
+                "wheat",
+                "prec",
+                "sea",
+                "--theta-start",
+                "-0.3",
+                "2",
+                "2",
+                "--satellite"
+            ],
+            // Show model fitting output in the integrated terminal.
+            "console": "integratedTerminal",
+            // Step through project code while treating installed packages as external code.
+            "justMyCode": true
+        }
+    ]
+}

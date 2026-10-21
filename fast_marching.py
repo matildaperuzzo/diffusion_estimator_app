@@ -2,7 +2,7 @@ import numpy as np
 # Import a min-heap so the next narrow-band point can be selected without scanning the full grid.
 import heapq
 
-def fast_marching(speed, start_points, W = None):
+def fast_marching(speed, start_points, W = None, latitudes=None):
     """
     Perform the Fast Marching Method to compute the arrival time of a front propagating through a
     medium with a given speed function.
@@ -29,7 +29,12 @@ def fast_marching(speed, start_points, W = None):
     heap = []
 
     neighbours = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-    h = [1.0, 1.0, 1.0, 1.0]
+    # Use latitude-aware east-west distances when geographic rows are supplied.
+    if latitudes is None:
+        latitudes = np.zeros(speed.shape[0])
+    latitudes = np.asarray(latitudes, dtype=float).ravel()
+    if latitudes.size != speed.shape[0]:
+        raise ValueError("latitudes must contain one value for every speed-grid row.")
 
     if W is None:
         W = np.ones_like(speed)
@@ -48,7 +53,9 @@ def fast_marching(speed, start_points, W = None):
             if 0 <= new_x < speed.shape[0] and 0 <= new_y < speed.shape[1]:
                 if not accepted[new_x, new_y]:
                     considered[new_x, new_y] = True
-                    s = h[i] * W[new_x, new_y] / speed[new_x, new_y]
+                    # Longitude steps shrink toward the poles by the cosine latitude factor.
+                    step_scale = 1.0 if dx != 0 else np.cos(np.deg2rad(latitudes[new_x]))
+                    s = step_scale * W[new_x, new_y] / speed[new_x, new_y]
                     # Use only accepted values in the upwind update.
                     T_candidate = calculate_T(accepted_times, new_x, new_y, s)
                     if T_candidate < T[new_x, new_y]:
@@ -77,7 +84,9 @@ def fast_marching(speed, start_points, W = None):
             if 0 <= new_x < speed.shape[0] and 0 <= new_y < speed.shape[1]:
                 if not accepted[new_x, new_y]:
                     considered[new_x, new_y] = True
-                    s = h[i] * W[new_x, new_y] / speed[new_x, new_y]
+                    # Apply the same physical distance scaling for later updates.
+                    step_scale = 1.0 if dx != 0 else np.cos(np.deg2rad(latitudes[new_x]))
+                    s = step_scale * W[new_x, new_y] / speed[new_x, new_y]
                     # Use only accepted values in the upwind update.
                     T_candidate = calculate_T(accepted_times, new_x, new_y, s)
                     if T_candidate < T[new_x, new_y]:
