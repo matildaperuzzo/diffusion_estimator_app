@@ -12,7 +12,7 @@ app's sea and precipitation files; the other conversion scripts remain in
 - `data/processed/layers/`: `csidata.h5`, `acc.h5`, `hmidata.h5`, `sea.h5`,
   `temp.h5`, `prec.h5`, and the legacy `W.h5`.
 - `data/processed/crop/`: `wheat.h5`, `rice.h5`, and `maize.h5`.
-- `layer_inspection.ipynb`: crop observations over a processed environmental layer.
+- `tests/layer_inspection.ipynb`: crop observations over a processed environmental layer.
 
 Both loaders resolve their default data directories from their module locations,
 independently of the working directory. A custom relative directory is resolved

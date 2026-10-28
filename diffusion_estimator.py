@@ -205,30 +205,46 @@ class DiffusionEstimator(object):
         # Apply the same sigmoid normalization used by the original estimator.
         return 1.0 / (1.0 + np.exp(-linear_speed))
 
-    def get_arrival_times(self, speed, latitudes=None, method="fast_marching", n_reps=100, random_state=None):
+    def get_arrival_times(
+        self, speed, latitudes=None, method="fast_marching", n_reps=100, random_state=None, apply_w=True
+    ):
         """
         Compute arrival times using fast marching or Monte Carlo propagation.
 
         Parameters:
         - speed: A 2D array representing the speed function.
+        - apply_w: Apply MATLAB's cosine-latitude weight once per cell by default.
 
         Returns:
         - T: A 2D array of arrival times.
         """
+        # Use the loaded latitude grid for both solvers unless the caller overrides it.
+        selected_latitudes = self.latitude if latitudes is None else latitudes
         # Dispatch explicitly so both solving methods share the estimator API.
         if method == "monte_carlo":
             from monte_carlo import simulate_arrival_times
-            return simulate_arrival_times(speed, [tuple(sp) for sp in self.start_points], n_reps, random_state)
+            return simulate_arrival_times(
+                speed,
+                [tuple(sp) for sp in self.start_points],
+                n_reps,
+                random_state,
+                apply_w=apply_w,
+                latitudes=selected_latitudes,
+            )
         if method != "fast_marching":
             raise ValueError("method must be 'fast_marching' or 'monte_carlo'.")
 
-        # Use the loaded latitude grid unless a caller supplies another one.
+        # Apply the same weight selection to fast marching.
         import fast_marching as fm
-        selected_latitudes = self.latitude if latitudes is None else latitudes
-        return fm.fast_marching(speed, [tuple(sp) for sp in self.start_points], latitudes=selected_latitudes)
+        return fm.fast_marching(
+            speed,
+            [tuple(sp) for sp in self.start_points],
+            latitudes=selected_latitudes,
+            apply_w=apply_w,
+        )
 
-    def calculate_simulation_times_and_error(self, speed, n_reps=100, dt=None, random_state=None):
-        """Calculate Monte Carlo simulation times and mean squared error."""
+    def calculate_simulation_times_and_error(self, speed, n_reps=100, dt=None, random_state=None, apply_w=True):
+        """Calculate Monte Carlo times and error with optional latitude weighting."""
         # Keep the Monte Carlo calculation available as a single estimator operation.
         from monte_carlo import calculate_simulation_times_and_error
         selected_dt = self.dt if dt is None else dt
@@ -239,6 +255,8 @@ class DiffusionEstimator(object):
             n_reps,
             selected_dt,
             random_state,
+            apply_w=apply_w,
+            latitudes=self.latitude,
         )
 
     def calculate_error(self, T):
@@ -254,13 +272,16 @@ class DiffusionEstimator(object):
         import calculate_errors as ce
         return ce.calculate_mse(self.dataset, T, self.dt)
 
-    def sweep_theta(self, theta_range, num_points, method="fast_marching", n_reps=100, random_state=None):
+    def sweep_theta(
+        self, theta_range, num_points, method="fast_marching", n_reps=100, random_state=None, apply_w=True
+    ):
         """
         Perform a sweep over the specified range of theta values.
 
         Parameters:
         - theta_range: A 2xN array with N being the number of layers + 1
         - num_points: Number of points to sample in the range.
+        - apply_w: Use the cosine-latitude weight for every evaluated model.
 
         Returns:
         - results: A list of mean squared errors corresponding to each theta value.
@@ -268,10 +289,20 @@ class DiffusionEstimator(object):
         all_thetas = [np.linspace(theta_range[0, i], theta_range[1, i], num_points) for i in range(theta_range.shape[1])]
         all_theta_combinations = np.array(np.meshgrid(*all_thetas)).T.reshape(-1, theta_range.shape[1])
         objective_function = np.zeros([all_theta_combinations.shape[0], len(theta_range[1]) + 1])
-        for i, theta in enumerate(tqdm.tqdm(all_theta_combinations, desc='Evaluating theta combinations')):
+        combinations = (
+            tqdm.tqdm(all_theta_combinations, desc='Evaluating theta combinations')
+            if tqdm is not None else all_theta_combinations
+        )
+        for i, theta in enumerate(combinations):
             speed = self.build_speed(theta)
             # Use the selected solver for every parameter combination.
-            T = self.get_arrival_times(speed, method=method, n_reps=n_reps, random_state=random_state)
+            T = self.get_arrival_times(
+                speed,
+                method=method,
+                n_reps=n_reps,
+                random_state=random_state,
+                apply_w=apply_w,
+            )
             error = self.calculate_error(T)
             objective_function[i, :theta.shape[0]] = theta
             objective_function[i, -1] = error
@@ -306,13 +337,16 @@ class DiffusionEstimator(object):
         else:
             print("Plotting not supported for this number of theta dimensions.")
 
-    def fit_theta(self, theta_start, theta_bounds=None, method="fast_marching", n_reps=100, random_state=None):
+    def fit_theta(
+        self, theta_start, theta_bounds=None, method="fast_marching", n_reps=100, random_state=None, apply_w=True
+    ):
         """
         Fit the theta parameters using projected gradient descent.
 
         Parameters:
         - theta_start: Initial guess for the theta parameters.
         - theta_bounds: Bounds for the theta parameters.
+        - apply_w: Use the cosine-latitude weight for every objective evaluation.
 
         Returns:
         - result: A dict containing the final theta, error, and iteration history.
@@ -325,6 +359,7 @@ class DiffusionEstimator(object):
                 method=method,
                 n_reps=n_reps,
                 random_state=random_state,
+                apply_w=apply_w,
             ))
 
         theta = np.array(theta_start, dtype=float).copy()
@@ -448,50 +483,95 @@ class DiffusionEstimator(object):
         self.fit_result = fit_result
         return fit_result
 
-# if __name__ == "__main__":
-    # crop = 'wheat'
-    # layers = ["prec","sea"]
-    # estimator = DiffusionEstimator(crop, layers)
-    # theta_range = np.array([(-2, 2), (-5, 5), (-5, 5)]).T
-    # num_points = 11
-    # min_theta, min_error = estimator.sweep_theta(theta_range, num_points)
-    # estimator.plot_objective_function()
-    # print(f"Minimum theta: {min_theta}")
-    # print(f"Minimum error: {min_error}")
-    # result = estimator.fit_theta(min_theta)
-    # print(f"Fitted theta: {result}")
+
+def run_experiment(crop, layers, method, method_options=None):
+    """Fit one crop/layer model with the selected arrival-time solver.
+
+    ``method`` is ``"fast_marching"`` or ``"monte_carlo"``. Options may include
+    estimator arguments (``dataset``, ``dt``, ``delta``, ``buffer_size_rad``,
+    ``data_directory``), fit arguments (``theta_start``, ``theta_bounds``,
+    ``n_reps``, ``random_state``, ``apply_w``), and optionally both
+    ``theta_range`` and ``num_points`` for a sweep before fitting.
+    """
+    if method not in ("fast_marching", "monte_carlo"):
+        raise ValueError("method must be 'fast_marching' or 'monte_carlo'.")
+    if isinstance(layers, str):
+        raise TypeError("layers must be a sequence of layer names, not a string.")
+    selected_layers = list(layers)
+    options = {} if method_options is None else dict(method_options)
+
+    estimator_keys = ("dataset", "dt", "delta", "buffer_size_rad", "data_directory")
+    fit_keys = ("theta_bounds", "n_reps", "random_state", "apply_w")
+    estimator_options = {key: options.pop(key) for key in estimator_keys if key in options}
+    fit_options = {key: options.pop(key) for key in fit_keys if key in options}
+    theta_start = options.pop("theta_start", None)
+    theta_range = options.pop("theta_range", None)
+    num_points = options.pop("num_points", None)
+    if options:
+        raise TypeError(f"Unknown method_options: {', '.join(sorted(options))}")
+    if (theta_range is None) != (num_points is None):
+        raise ValueError("theta_range and num_points must be supplied together.")
+    if theta_range is not None and theta_start is not None:
+        raise ValueError("Choose either theta_start or a theta_range sweep.")
+
+    parameter_count = len(selected_layers) + 1
+    if theta_range is not None:
+        theta_range = np.asarray(theta_range, dtype=float)
+        if theta_range.shape != (2, parameter_count) or not np.all(np.isfinite(theta_range)):
+            raise ValueError("theta_range must be a finite 2-by-(layers+1) array.")
+        if isinstance(num_points, bool) or not isinstance(num_points, (int, np.integer)) or num_points < 1:
+            raise ValueError("num_points must be a positive integer.")
+    else:
+        theta_start = np.zeros(parameter_count) if theta_start is None else np.asarray(theta_start, dtype=float)
+        if theta_start.shape != (parameter_count,) or not np.all(np.isfinite(theta_start)):
+            raise ValueError("theta_start must have one finite intercept and one coefficient per layer.")
+
+    estimator = DiffusionEstimator(crop, selected_layers, **estimator_options)
+    sweep_result = None
+    if theta_range is not None:
+        theta_start, minimum_error = estimator.sweep_theta(
+            theta_range,
+            num_points,
+            method=method,
+            n_reps=fit_options.get("n_reps", 100),
+            random_state=fit_options.get("random_state"),
+            apply_w=fit_options.get("apply_w", True),
+        )
+        sweep_result = {"theta": theta_start.copy(), "error": float(minimum_error)}
+
+    fit_result = estimator.fit_theta(theta_start, method=method, **fit_options)
+    return {
+        "crop": estimator.crop,
+        "layers": selected_layers,
+        "method": method,
+        "estimator": estimator,
+        "sweep_result": sweep_result,
+        "fit_result": fit_result,
+    }
+
+
+def run_crop_experiments(crop, layers, method, method_options=None):
+    """Run one experiment for each layer list and return results in input order."""
+    if isinstance(layers, str):
+        raise TypeError("layers must be a sequence of layer lists.")
+    results = []
+    for layer_set in layers:
+        if isinstance(layer_set, str):
+            raise TypeError("Each experiment must provide a sequence of layer names.")
+        results.append(run_experiment(crop, layer_set, method, method_options))
+    return results
+
 
 if __name__ == "__main__":
-    crop = "wheat"
-    layers = ["prec", "sea"]
-
-    estimator = DiffusionEstimator(crop, layers)
-
     theta_range = np.array([
         (-2, 2),
         (-5, 5),
         (-5, 5),
     ]).T
-
-    # Use fewer repetitions while testing; increase for better estimates.
-    monte_carlo_reps = 6
-
-    min_theta, min_error = estimator.sweep_theta(
-        theta_range,
-        num_points=3,
-        method="monte_carlo",
-        n_reps=monte_carlo_reps,
-        random_state=42,
+    experiment = run_experiment(
+        "wheat", ["prec", "sea"], "monte_carlo",
+        {"theta_range": theta_range, "num_points": 3, "n_reps": 6, "random_state": 42},
     )
-
-    print(f"Minimum theta: {min_theta}")
-    print(f"Minimum error: {min_error}")
-
-    result = estimator.fit_theta(
-        min_theta,
-        method="monte_carlo",
-        n_reps=monte_carlo_reps,
-        random_state=42,
-    )
-
-    print(f"Fitted theta: {result}")
+    print(f"Minimum theta: {experiment['sweep_result']['theta']}")
+    print(f"Minimum error: {experiment['sweep_result']['error']}")
+    print(f"Fitted theta: {experiment['fit_result']}")

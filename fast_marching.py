@@ -2,7 +2,10 @@ import numpy as np
 # Import a min-heap so the next narrow-band point can be selected without scanning the full grid.
 import heapq
 
-def fast_marching(speed, start_points, W = None, latitudes=None):
+# Resolve the same latitude weight used by MATLAB's marching solver.
+from spatial_weights import resolve_spatial_weights
+
+def fast_marching(speed, start_points, W=None, latitudes=None, apply_w=True):
     """
     Perform the Fast Marching Method to compute the arrival time of a front propagating through a
     medium with a given speed function.
@@ -13,7 +16,14 @@ def fast_marching(speed, start_points, W = None, latitudes=None):
     start_points : list of tuples
         A list of (x, y, time) tuples representing the initial points and their arrival times.
     W : ndarray, optional
-        A 2D array representing the weight function of the medium. If None, it defaults to ones.
+        An explicit 2D weight raster. When omitted and apply_w is true, the
+        weight is calculated as cos(latitude) for every grid row.
+    latitudes : ndarray, optional
+        Latitude in degrees for each row, required when W is omitted and
+        apply_w is true.
+    apply_w : bool, optional
+        Apply the spatial weight to every direction, as in MATLAB. Defaults to
+        true; false uses unit weights.
 
     Returns:
     T : ndarray
@@ -29,15 +39,8 @@ def fast_marching(speed, start_points, W = None, latitudes=None):
     heap = []
 
     neighbours = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-    # Use latitude-aware east-west distances when geographic rows are supplied.
-    if latitudes is None:
-        latitudes = np.zeros(speed.shape[0])
-    latitudes = np.asarray(latitudes, dtype=float).ravel()
-    if latitudes.size != speed.shape[0]:
-        raise ValueError("latitudes must contain one value for every speed-grid row.")
-
-    if W is None:
-        W = np.ones_like(speed)
+    # Match msfm2d by multiplying the slowness by W once in all directions.
+    W = resolve_spatial_weights(speed.shape, apply_w=apply_w, latitudes=latitudes, W=W)
 
     for start_point in start_points:
         # estimate points around starting points
@@ -53,9 +56,8 @@ def fast_marching(speed, start_points, W = None, latitudes=None):
             if 0 <= new_x < speed.shape[0] and 0 <= new_y < speed.shape[1]:
                 if not accepted[new_x, new_y]:
                     considered[new_x, new_y] = True
-                    # Longitude steps shrink toward the poles by the cosine latitude factor.
-                    step_scale = 1.0 if dx != 0 else np.cos(np.deg2rad(latitudes[new_x]))
-                    s = step_scale * W[new_x, new_y] / speed[new_x, new_y]
+                    # Use the destination cell's weighted slowness for either axis.
+                    s = W[new_x, new_y] / speed[new_x, new_y]
                     # Use only accepted values in the upwind update.
                     T_candidate = calculate_T(accepted_times, new_x, new_y, s)
                     if T_candidate < T[new_x, new_y]:
@@ -84,9 +86,8 @@ def fast_marching(speed, start_points, W = None, latitudes=None):
             if 0 <= new_x < speed.shape[0] and 0 <= new_y < speed.shape[1]:
                 if not accepted[new_x, new_y]:
                     considered[new_x, new_y] = True
-                    # Apply the same physical distance scaling for later updates.
-                    step_scale = 1.0 if dx != 0 else np.cos(np.deg2rad(latitudes[new_x]))
-                    s = step_scale * W[new_x, new_y] / speed[new_x, new_y]
+                    # Apply the same destination weight to later updates.
+                    s = W[new_x, new_y] / speed[new_x, new_y]
                     # Use only accepted values in the upwind update.
                     T_candidate = calculate_T(accepted_times, new_x, new_y, s)
                     if T_candidate < T[new_x, new_y]:

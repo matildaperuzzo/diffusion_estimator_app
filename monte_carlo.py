@@ -3,6 +3,9 @@
 # Import NumPy for array operations and reproducible random sampling.
 import numpy as np
 
+# Resolve the same latitude weight used by MATLAB's stochastic solver.
+from spatial_weights import resolve_spatial_weights
+
 
 def _frontier(active: np.ndarray) -> np.ndarray:
     """Return cells adjacent to at least one active cell."""
@@ -20,12 +23,17 @@ def simulate_arrival_times(
     start_points: list[tuple[float, float, float]],
     n_reps: int,
     random_state: int | np.random.Generator | None = None,
+    *,
+    apply_w: bool = True,
+    latitudes: np.ndarray | None = None,
+    W: np.ndarray | None = None,
 ) -> np.ndarray:
     """Average first-adoption times over Monte Carlo front simulations.
 
-    ``speed`` is interpreted as a cell-wise adoption probability, matching the
-    sigmoid output of the estimator's speed builder. Unreached cells retain
-    ``np.inf`` in each repetition and in the returned average.
+    ``speed`` is interpreted as a cell-wise adoption probability. By default,
+    latitude weights reproduce MATLAB's ``rand * W <= speed`` comparison.
+    Standalone callers supply row latitudes or an explicit W. Unreached cells
+    retain ``np.inf`` in each repetition and in the returned average.
     """
     # Validate the simulation count before allocating potentially large arrays.
     if n_reps <= 0:
@@ -39,6 +47,10 @@ def simulate_arrival_times(
         raise ValueError("speed must be a two-dimensional array.")
     if np.any((probabilities < 0.0) | (probabilities > 1.0)):
         raise ValueError("speed values must be between zero and one.")
+
+    # Convert MATLAB's weighted random threshold to its equivalent probability.
+    weights = resolve_spatial_weights(probabilities.shape, apply_w=apply_w, latitudes=latitudes, W=W)
+    probabilities = np.minimum(probabilities / weights, 1.0)
 
     # Accept either a seed or an existing generator for reproducible runs.
     rng = random_state if isinstance(random_state, np.random.Generator) else np.random.default_rng(random_state)
@@ -88,10 +100,22 @@ def calculate_simulation_times_and_error(
     n_reps: int,
     dt: float = 1.0,
     random_state: int | np.random.Generator | None = None,
+    *,
+    apply_w: bool = True,
+    latitudes: np.ndarray | None = None,
+    W: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
     """Calculate averaged simulation times and their mean squared error."""
     # Run the stochastic solver once, then compare only the observed data cells.
-    simulation_times = simulate_arrival_times(speed, start_points, n_reps, random_state)
+    simulation_times = simulate_arrival_times(
+        speed,
+        start_points,
+        n_reps,
+        random_state,
+        apply_w=apply_w,
+        latitudes=latitudes,
+        W=W,
+    )
     observations = np.asarray(dataset)
     indices = observations[:, :2].astype(int)
     predicted = simulation_times[indices[:, 0], indices[:, 1]]
