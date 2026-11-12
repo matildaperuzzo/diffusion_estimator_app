@@ -131,11 +131,13 @@ def format_table(rows, method, dt, delta, apply_w, n_reps, seed, theta_limit, sw
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--method", choices=("fast_marching", "monte_carlo"), default="fast_marching")
+    parser.add_argument("--method", choices=("fast_marching", "monte_carlo"), default="monte_carlo")
     parser.add_argument("--delta", type=float, default=0.5)
     parser.add_argument("--dt", type=float, default=40.0)
     parser.add_argument("--n-reps", type=int, default=100, help="Monte Carlo repetitions")
     parser.add_argument("--seed", type=int, default=12, help="Monte Carlo random seed")
+    parser.add_argument("--time-horizon", type=int, default=None,
+                        help="override MATLAB-style T derived from observation years")
     parser.add_argument("--theta-limit", type=float, default=5.0,
                         help="Absolute bound for every theta coefficient")
     parser.add_argument("--sweep-points", type=int, default=3,
@@ -149,6 +151,8 @@ def main(argv=None):
         parser.error("--theta-limit must be a positive finite number")
     if args.sweep_points < 1:
         parser.error("--sweep-points must be a positive integer")
+    if args.time_horizon is not None and args.time_horizon < 1:
+        parser.error("--time-horizon must be a positive integer")
     options = {
         "delta": args.delta,
         "dt": args.dt,
@@ -157,6 +161,8 @@ def main(argv=None):
         "apply_w": not args.no_w,
         "theta_bounds": (-args.theta_limit, args.theta_limit),
     }
+    if args.time_horizon is not None:
+        options["time_horizon"] = args.time_horizon
     rows = collect_results(CROPS, args.method, options, args.sweep_points, args.theta_limit)
     rows = select_nested_baselines(refine_from_sea(rows, args.method, options))
     table = format_table(rows, args.method, args.dt, args.delta, not args.no_w,

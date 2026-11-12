@@ -21,7 +21,7 @@ From the repository root, run the prepared experiment script with the project's 
 .\.venv\Scripts\python.exe run_crop_layer_experiments.py
 ```
 
-It fits 18 models: average-only, sea, and sea with each of precipitation, temperature, CSI, and hydro for all three crops. It writes [the theta and squared-error table](results/crop_layer_experiments.md). Fast marching, `delta=0.5`, `dt=40`, latitude weighting, theta bounds of `[-5, 5]`, and a three-point starting sweep are the defaults. Use `--method monte_carlo --n-reps 100 --seed 12` for Monte Carlo fits, or `--help` for all options.
+It fits 18 models: average-only, sea, and sea with each of precipitation, temperature, CSI, and hydro for all three crops. It writes [the theta and squared-error table](results/crop_layer_experiments.md). Monte Carlo, `delta=0.5`, `dt=40`, latitude weighting, theta bounds of `[-5, 5]`, and a three-point starting sweep are the defaults. Use `--method fast_marching` for fast marching fits, or `--help` for all options.
 
 For a custom model, call the runners directly:
 
@@ -35,10 +35,13 @@ options = {
 }
 one = run_experiment("wheat", ["prec", "sea"], "fast_marching", options)
 print(one["fit_result"].x, one["fit_result"].fun)
+print(one["result_path"])
 
 many = run_crop_experiments(
     "wheat", [["prec", "sea"], ["tmean", "sea"]], "fast_marching", options
 )
 ```
 
-`run_experiment` returns the estimator, fit result, and optional sweep result in a dictionary; `run_crop_experiments` returns one such dictionary per layer list. Shared sweep bounds must match the parameter count of every layer list. In `method_options`, use either `theta_start` or `theta_range` with `num_points`; `delta`, `dt`, `n_reps`, `random_state`, and `apply_w` are also supported.
+`run_experiment` returns the estimator, fit result, optional sweep result, and `result_path` in a dictionary. It automatically writes one JSON result per optimizer call to `generated_data/`. The result records effective inputs, theta, squared error, termination status, history, and data/code provenance; `OptimizationResult.from_json(path)` reads it back. `run_crop_experiments` returns one such dictionary per layer list. Shared sweep bounds must match the parameter count of every layer list. In `method_options`, use either `theta_start` or `theta_range` with `num_points`; `delta`, `dt`, `n_reps`, `random_state`, `apply_w`, and `result_directory` are also supported.
+
+For Monte Carlo runs, the estimator calculates MATLAB's frame count automatically: `T = round((ceil(max(years)/dt)*dt + 1000 - floor(min(years)/dt)*dt)/dt + 1)`. An explicit `time_horizon` (or CLI `--time-horizon`) overrides it. Python stores zero-based arrival times, so a cell unreached by MATLAB frame T is assigned T−1. The default seed is 12, but NumPy's random stream is not MATLAB Threefry, so equal seeds do not reproduce MATLAB's draws.

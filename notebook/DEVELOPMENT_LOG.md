@@ -1,5 +1,29 @@
 # Development log
 
+## 2026-11-12 10:11 +00:00 — MATLAB horizon derived automatically (Codex)
+
+- Read `bottlenecks/src/data_prep.m` and `calculate_times.m` without changing that repository. MATLAB sets `start_time=floor(min(years)/dt)*dt`, `end_time=ceil(max(years)/dt)*dt+1000`, and `T=round((end_time-start_time)/dt+1)`. `calculate_times.m` returns one-based arrival frames, using T for unreached observations.
+- Implemented this frame count from the estimator's crop observation years and `dt`. Monte Carlo now uses it automatically unless `time_horizon` is explicitly supplied. Corrected unreached Python arrivals to T−1 to match its zero-based observation indices. Updated README and CLI help.
+- Added a horizon-calculation test and corrected the unreached-cell test. Fifteen relevant tests passed. A read-only calculation from the processed crop observations gives T=276 (wheat), 185 (rice), and 167 (maize) at dt=40; these are Python-data horizons, not validated against MATLAB input datasets. No crop fits were rerun. NumPy random draws still differ from MATLAB Threefry. Changes remain unstaged; shared dashboard sync remains pending outside the writable workspace.
+
+## 2026-11-12 10:09 +00:00 — Monte Carlo MATLAB timing alignment (Codex)
+
+- Added optional `time_horizon=T` through the Python Monte Carlo solver, estimator, sweep, fit, runner, and prepared CLI. In this mode Python runs T frames, assigns unreached cells arrival T, and generates a full random T-frame cube per repetition as MATLAB does. The default Monte Carlo seed is now 12. README documents the option and that NumPy draws still differ from MATLAB Threefry at the same seed.
+- Added a focused horizon/error test. Fourteen relevant tests passed (`tests.test_spatial_weight`, `tests.test_experiment_runners`, `tests.test_crop_layer_experiments`); `git diff --check` found no whitespace errors. No crop fits were rerun and no scientific result was recorded.
+- MATLAB's `parameters.T` must be supplied explicitly because `data_prep.m` is unavailable here. Existing origin-unknown Git changes were preserved; notebook changes remain unstaged. Shared dashboard sync remains pending outside the writable workspace.
+
+## 2026-11-12 09:53 +00:00 — MATLAB/Python fit-path review (Codex)
+
+- Compared `matlab_comparison_scripts/fit_model.m`, its `run_model.m`, Python `run_experiment`, `fit_theta`, `sweep_theta`, and Monte Carlo solver. This was a code review; no fits or tests were run. Ranked possible causes were reported to the user as unverified hypotheses, without scientific interpretation.
+- MATLAB uses `data_prep`, two 11-point sweeps (first with 20 repetitions), and unbounded trust-region `fminunc` with gradient/Hessian support. Python loads processed HDF5, defaults to zero theta unless a sweep or explicit start is supplied, and runs projected finite-difference gradient descent for at most 10 iterations. The two stochastic solvers differ in RNG implementation and time horizon.
+- Intervening Git changes of unknown origin: tracked root `run_model.m` is deleted and untracked `matlab_comparison_scripts/` now contains `run_model.m` and `fit_model.m`. No code was changed by Codex; notebook changes remain unstaged.
+
+## 2026-11-12 09:14 +00:00 — Repository familiarization (Codex)
+
+- Read the README, project status, recent development history, logging preferences, data-processing guide, and estimator structure. No scientific entry contents were read.
+- Confirmed `main` remains at `4bf6071`. The existing working tree has modified `.gitignore`, `README.md`, `diffusion_estimator.py`, `notebook/DEVELOPMENT_LOG.md`, `notebook/STATUS.md`, `run_crop_layer_experiments.py`, and `tests/test_experiment_runners.py`, plus untracked `optimization_result.py`. These changes predate this review; no code or tests were changed or run.
+- The app loads crop observations and environmental layers from processed HDF5, builds sigmoid speed maps, computes arrival times with fast marching or Monte Carlo, fits model coefficients, and records optimizer runs as JSON. The prepared script covers 18 crop/layer combinations.
+
 ## 2026-10-28 10:34 +00:00 — Notebook initialized (Codex)
 
 - Created the six project notebook files without staging or committing.
@@ -74,3 +98,15 @@
 - At session start, found a clean working tree on `main` at `0984299b8cad8d64473615db45c4918ae9f513ee` (`added notebooks and layer comparison`, committed 2026-10-28 17:23 +00:00). This intervening Git commit includes the prior notebook, experiment code, and results; its author and trigger were not established. The previously recorded HEAD was `532e82fcae9f7fff76f734222c228deeb666c80b`.
 - Replaced the one-line [README.md](../README.md) with a concise description of `DiffusionEstimator`, available crops/layers, speed and arrival-time methods, fitting, the experiment runner return values, and commands for custom and prepared crop runs.
 - Verified both README links resolve and its Python example parses. `git diff --check` reported no whitespace errors (only a line-ending conversion notice). No model run or application code change was made. Notebook changes remain unstaged.
+
+## 2026-11-02 10:33 +00:00 — Optimizer-run result design (Codex)
+
+- Reviewed `fit_theta`, `sweep_theta`, `run_experiment`, and the crop/layer script. `fit_theta` currently returns theta, final error, iteration count, history, and an unconditional `success=True`; callers separately hold solver, grid, data, bounds, and sweep settings. The table script may fit several candidates per row and retain only the selected one.
+- Proposed a versioned, JSON-serializable record per optimizer call containing effective model/data/solver/optimizer inputs, initialization source, theta and MSE outputs, termination reason, evaluation count, iteration history, timing, and source-code/data provenance. Selection among candidate runs belongs in a separate summary with run IDs. No application code, experiment output, or scientific result changed.
+- Detected external HEAD `4bf607126279c7efdef2cd0a955b4f6a20e7a498` (`added readme`, 2026-11-02 10:23 +00:00), replacing previously recorded `0984299b8cad8d64473615db45c4918ae9f513ee`. Also found an uncommitted, origin-unknown change to the crop/layer script default method from fast marching to Monte Carlo; Codex left it untouched. Next step: implement the result type if requested.
+
+## 2026-11-03 12:46 +00:00 — Saved optimizer-run records (Codex)
+
+- Added [optimization_result.py](../optimization_result.py): a versioned JSON result with run ID, timestamps, effective model/data/solver/optimizer inputs, initialization source and sweep evaluations, theta, MSE, iteration history, objective-evaluation count, stopping status, duration, and Git/Python/source-file provenance. Loaded data arrays are identified by SHA-256, shape, and dtype; source files by path, size, and modification time. Large raster arrays are not embedded. `fit_theta` retains `.x`, `.fun`, and `.nit` compatibility, and its success flag now reports gradient-tolerance termination rather than always being true.
+- `run_experiment` now saves each fit to `generated_data/` by default and returns `result_path`; `result_directory` overrides the location. The folder is Git-ignored. Updated README usage and corrected its default-solver description to match the existing, origin-unknown Monte Carlo CLI change; that script itself was not edited by Codex.
+- Six runner tests, three crop/layer table tests, and Python compilation passed. A real wheat intercept-only fast-marching run from theta 0 saved [this result](../generated_data/2026-11-03T101901_wheat_da3d0f0e08af4f478faeb4407802fa85.json) and reloaded it: status `gradient_tolerance`, theta `-0.65011158`, MSE `2603382.419410296` years². The solver emitted numerical overflow warnings during rejected line-search trials; no scientific interpretation is attached. The JSON is local and ignored by Git. Notebook changes remain unstaged; no commit was made.

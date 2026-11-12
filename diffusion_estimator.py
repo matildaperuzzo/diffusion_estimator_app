@@ -1,4 +1,11 @@
 import numpy as np
+from copy import deepcopy
+from datetime import datetime, timezone
+from hashlib import sha256
+import platform
+import subprocess
+from time import perf_counter
+from uuid import uuid4
 # Keep tqdm optional so fitting and plotting work in minimal environments.
 try:
     import tqdm
@@ -7,6 +14,8 @@ except ImportError:
 from pathlib import Path
 from scipy.io import loadmat
 import os
+
+from optimization_result import OptimizationResult
 
 # Import the standardized HDF5 loaders used by the estimator.
 from processing.load_data import load_data
@@ -21,6 +30,53 @@ LAYER_FILE_NAMES = {
     "sea": "sea",
     "tmean": "temp",
 }
+
+
+def matlab_time_horizon(years, dt):
+    """Return data_prep.m's inclusive frame count for observation years."""
+    years = np.asarray(years, dtype=float)
+    if years.size == 0 or not np.all(np.isfinite(years)) or not np.isfinite(dt) or dt <= 0:
+        raise ValueError("years must be nonempty and finite, and dt must be positive.")
+    start_time = np.floor(years.min() / dt) * dt
+    end_time = np.ceil(years.max() / dt) * dt + 1000
+    return int(np.floor((end_time - start_time) / dt + 1 + 0.5))
+
+
+def _array_identity(values):
+    array = np.ascontiguousarray(values)
+    return {
+        "shape": list(array.shape),
+        "dtype": str(array.dtype),
+        "sha256": sha256(array.tobytes()).hexdigest(),
+    }
+
+
+def _file_identity(path):
+    path = Path(path).resolve()
+    stat = path.stat()
+    return {"path": str(path), "size_bytes": stat.st_size, "modified_ns": stat.st_mtime_ns}
+
+
+def _git_provenance():
+    root = Path(__file__).resolve().parent
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True, timeout=5
+        ).stdout.strip()
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root, capture_output=True, text=True, check=True, timeout=5,
+        ).stdout.strip())
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        revision, dirty = None, None
+    return {
+        "git_commit": revision, "git_dirty": dirty,
+        "python_version": platform.python_version(),
+        "source_sha256": {
+            name: sha256((root / name).read_bytes()).hexdigest()
+            for name in ("diffusion_estimator.py", "optimization_result.py")
+        },
+    }
 
 
 class DiffusionEstimator(object):
@@ -44,6 +100,8 @@ class DiffusionEstimator(object):
         self.layers = list(layers)
         self.dt = dt
         self.delta = delta
+        self.buffer_size_rad = buffer_size_rad
+        self.dataset_is_override = dataset is not None
 
         # Resolve the processed-data directory relative to this module by default.
         processed_directory = Path(data_directory) if data_directory is not None else Path(__file__).resolve().parent / "data" / "processed"
@@ -67,6 +125,7 @@ class DiffusionEstimator(object):
             float(self.crop_points["time"].min()),
             float(self.crop_points["time"].max()),
         )
+        self.time_horizon = matlab_time_horizon(self.crop_points["time"], self.dt)
 
         # Load every requested environmental layer on the crop's common grid.
         self.layer_data = {}
@@ -206,7 +265,8 @@ class DiffusionEstimator(object):
         return 1.0 / (1.0 + np.exp(-linear_speed))
 
     def get_arrival_times(
-        self, speed, latitudes=None, method="fast_marching", n_reps=100, random_state=None, apply_w=True
+        self, speed, latitudes=None, method="fast_marching", n_reps=100, random_state=12,
+        apply_w=True, time_horizon=None
     ):
         """
         Compute arrival times using fast marching or Monte Carlo propagation.
@@ -218,6 +278,8 @@ class DiffusionEstimator(object):
         Returns:
         - T: A 2D array of arrival times.
         """
+        if method == "monte_carlo" and time_horizon is None:
+            time_horizon = getattr(self, "time_horizon", None)
         # Use the loaded latitude grid for both solvers unless the caller overrides it.
         selected_latitudes = self.latitude if latitudes is None else latitudes
         # Dispatch explicitly so both solving methods share the estimator API.
@@ -230,6 +292,7 @@ class DiffusionEstimator(object):
                 random_state,
                 apply_w=apply_w,
                 latitudes=selected_latitudes,
+                time_horizon=time_horizon,
             )
         if method != "fast_marching":
             raise ValueError("method must be 'fast_marching' or 'monte_carlo'.")
@@ -243,11 +306,14 @@ class DiffusionEstimator(object):
             apply_w=apply_w,
         )
 
-    def calculate_simulation_times_and_error(self, speed, n_reps=100, dt=None, random_state=None, apply_w=True):
+    def calculate_simulation_times_and_error(self, speed, n_reps=100, dt=None, random_state=12,
+                                             apply_w=True, time_horizon=None):
         """Calculate Monte Carlo times and error with optional latitude weighting."""
         # Keep the Monte Carlo calculation available as a single estimator operation.
         from monte_carlo import calculate_simulation_times_and_error
         selected_dt = self.dt if dt is None else dt
+        if time_horizon is None:
+            time_horizon = getattr(self, "time_horizon", None)
         return calculate_simulation_times_and_error(
             speed,
             self.dataset,
@@ -257,6 +323,7 @@ class DiffusionEstimator(object):
             random_state,
             apply_w=apply_w,
             latitudes=self.latitude,
+            time_horizon=time_horizon,
         )
 
     def calculate_error(self, T):
@@ -273,7 +340,8 @@ class DiffusionEstimator(object):
         return ce.calculate_mse(self.dataset, T, self.dt)
 
     def sweep_theta(
-        self, theta_range, num_points, method="fast_marching", n_reps=100, random_state=None, apply_w=True
+        self, theta_range, num_points, method="fast_marching", n_reps=100, random_state=12,
+        apply_w=True, time_horizon=None
     ):
         """
         Perform a sweep over the specified range of theta values.
@@ -296,12 +364,14 @@ class DiffusionEstimator(object):
         for i, theta in enumerate(combinations):
             speed = self.build_speed(theta)
             # Use the selected solver for every parameter combination.
+            arrival_options = {"time_horizon": time_horizon} if time_horizon is not None else {}
             T = self.get_arrival_times(
                 speed,
                 method=method,
                 n_reps=n_reps,
                 random_state=random_state,
                 apply_w=apply_w,
+                **arrival_options,
             )
             error = self.calculate_error(T)
             objective_function[i, :theta.shape[0]] = theta
@@ -338,7 +408,8 @@ class DiffusionEstimator(object):
             print("Plotting not supported for this number of theta dimensions.")
 
     def fit_theta(
-        self, theta_start, theta_bounds=None, method="fast_marching", n_reps=100, random_state=None, apply_w=True
+        self, theta_start, theta_bounds=None, method="fast_marching", n_reps=100,
+        random_state=12, apply_w=True, time_horizon=None
     ):
         """
         Fit the theta parameters using projected gradient descent.
@@ -348,18 +419,25 @@ class DiffusionEstimator(object):
         - theta_bounds: Bounds for the theta parameters.
         - apply_w: Use the cosine-latitude weight for every objective evaluation.
 
-        Returns:
-        - result: A dict containing the final theta, error, and iteration history.
+        Returns an OptimizationResult with the effective inputs and outputs.
         """
+        started_at = datetime.now(timezone.utc).isoformat()
+        start_clock = perf_counter()
+        nfev = 0
+
         def objective(theta):
+            nonlocal nfev
+            nfev += 1
             speed = self.build_speed(theta)
             # Evaluate the objective with the selected numerical solver.
+            arrival_options = {"time_horizon": time_horizon} if time_horizon is not None else {}
             return self.calculate_error(self.get_arrival_times(
                 speed,
                 method=method,
                 n_reps=n_reps,
                 random_state=random_state,
                 apply_w=apply_w,
+                **arrival_options,
             ))
 
         theta = np.array(theta_start, dtype=float).copy()
@@ -377,14 +455,16 @@ class DiffusionEstimator(object):
         def project(values):
             return np.minimum(np.maximum(values, lower_bounds), upper_bounds)
 
-        def finite_difference_gradient(values, epsilon=1e-4):
+        gradient_epsilon = 1e-4
+
+        def finite_difference_gradient(values):
             gradient = np.zeros_like(values, dtype=float)
             for index in range(values.size):
                 step = np.zeros_like(values, dtype=float)
-                step[index] = epsilon
+                step[index] = gradient_epsilon
                 forward = objective(project(values + step))
                 backward = objective(project(values - step))
-                gradient[index] = (forward - backward) / (2 * epsilon)
+                gradient[index] = (forward - backward) / (2 * gradient_epsilon)
             return gradient
 
         max_iter = 10
@@ -394,13 +474,70 @@ class DiffusionEstimator(object):
         armijo_c = 1e-8
         tolerance = 1e5
         history = []
+        status = "max_iterations"
+
+        used_layers = self.layers or ["sea"]
+        recorded_random_state = (
+            {"bit_generator": type(random_state.bit_generator).__name__,
+             "state": deepcopy(random_state.bit_generator.state)}
+            if isinstance(random_state, np.random.Generator) else random_state
+        )
+        inputs = {
+            "model": {
+                "crop": self.crop, "layers": list(self.layers), "dt": self.dt,
+                "delta": self.delta, "buffer_size_rad": self.buffer_size_rad,
+                "grid_shape": self.grid_shape, "latitude_extent": self.latitude_extent,
+                "longitude_extent": self.longitude_extent, "year_extent": self.year_extent,
+                "start_points": self.start_points,
+            },
+            "data": {
+                "data_directory": self.data_directory.resolve(),
+                "crop_file": _file_identity(self.data_directory / "crop" / f"{self.crop}.h5"),
+                "dataset_source": "override" if self.dataset_is_override else "crop_file",
+                "dataset": _array_identity(self.dataset),
+                "layer_files": {
+                    name: _file_identity(
+                        self.data_directory / "layers" / f"{LAYER_FILE_NAMES.get(name, name)}.h5"
+                    ) for name in used_layers
+                },
+                "loaded_layers": {
+                    name: _array_identity(values) for name, values in self.layer_data.items()
+                },
+            },
+            "solver": {
+                "method": method, "n_reps": n_reps, "random_state": recorded_random_state,
+                "apply_w": apply_w,
+                "time_horizon": (getattr(self, "time_horizon", None)
+                                 if method == "monte_carlo" and time_horizon is None
+                                 else time_horizon),
+            },
+            "optimizer": {
+                "name": "projected_gradient_descent", "theta_start": theta_start,
+                "theta_bounds": np.column_stack((lower_bounds, upper_bounds)),
+                "max_iter": max_iter, "initial_learning_rate": initial_learning_rate,
+                "min_learning_rate": min_learning_rate, "backtrack_factor": backtrack_factor,
+                "armijo_c": armijo_c, "gradient_tolerance": tolerance,
+                "gradient_epsilon": gradient_epsilon,
+            },
+            "initialization": {"source": "direct", "sweep": None},
+        }
 
         for iteration in range(1, max_iter + 1):
             error = objective(theta)
             gradient = finite_difference_gradient(theta)
             grad_norm = np.linalg.norm(gradient)
 
+            if not np.isfinite(error) or not np.all(np.isfinite(gradient)):
+                status = "nonfinite_objective"
+                history.append({
+                    "iteration": iteration, "theta": theta.copy(), "error": float(error),
+                    "gradient": gradient.copy(), "gradient_norm": float(grad_norm),
+                    "learning_rate": 0.0, "accepted": False,
+                })
+                break
+
             if grad_norm < tolerance:
+                status = "gradient_tolerance"
                 history.append({
                     "iteration": iteration,
                     "theta": theta.copy(),
@@ -459,6 +596,7 @@ class DiffusionEstimator(object):
             )
 
             if not accepted:
+                status = "line_search_failed"
                 print("Stopping: line search could not find a decreasing step.")
                 break
 
@@ -468,15 +606,26 @@ class DiffusionEstimator(object):
         print(f"Final theta: {theta}")
         print(f"Final error: {final_error:.6f}")
 
-        from types import SimpleNamespace
-
-        fit_result = SimpleNamespace(
-            x=theta,
-            fun=float(final_error),
-            nit=len(history),
-            history=history,
-            success=True,
-            message="Projected gradient descent completed.",
+        messages = {
+            "gradient_tolerance": "Gradient tolerance reached.",
+            "max_iterations": "Maximum iterations reached.",
+            "line_search_failed": "Line search could not find a decreasing step.",
+            "nonfinite_objective": "Objective or gradient became non-finite.",
+        }
+        fit_result = OptimizationResult(
+            run_id=uuid4().hex,
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            inputs=inputs,
+            outputs={
+                "theta": theta.copy(), "squared_error_years2": float(final_error),
+                "initial_squared_error_years2": history[0]["error"],
+                "iterations": len(history), "objective_evaluations": nfev,
+                "status": status, "success": status == "gradient_tolerance",
+                "message": messages[status], "history": history,
+                "duration_seconds": perf_counter() - start_clock,
+            },
+            provenance=_git_provenance(),
         )
 
         self.fit_history = history
@@ -490,8 +639,9 @@ def run_experiment(crop, layers, method, method_options=None):
     ``method`` is ``"fast_marching"`` or ``"monte_carlo"``. Options may include
     estimator arguments (``dataset``, ``dt``, ``delta``, ``buffer_size_rad``,
     ``data_directory``), fit arguments (``theta_start``, ``theta_bounds``,
-    ``n_reps``, ``random_state``, ``apply_w``), and optionally both
-    ``theta_range`` and ``num_points`` for a sweep before fitting.
+    ``n_reps``, ``random_state``, ``apply_w``, ``time_horizon``), and optionally both
+    ``theta_range`` and ``num_points`` for a sweep before fitting. Each fit is
+    saved as JSON under ``generated_data`` (or ``result_directory``).
     """
     if method not in ("fast_marching", "monte_carlo"):
         raise ValueError("method must be 'fast_marching' or 'monte_carlo'.")
@@ -499,11 +649,13 @@ def run_experiment(crop, layers, method, method_options=None):
         raise TypeError("layers must be a sequence of layer names, not a string.")
     selected_layers = list(layers)
     options = {} if method_options is None else dict(method_options)
+    result_directory = Path(options.pop("result_directory", Path(__file__).resolve().parent / "generated_data"))
 
     estimator_keys = ("dataset", "dt", "delta", "buffer_size_rad", "data_directory")
-    fit_keys = ("theta_bounds", "n_reps", "random_state", "apply_w")
+    fit_keys = ("theta_bounds", "n_reps", "random_state", "apply_w", "time_horizon")
     estimator_options = {key: options.pop(key) for key in estimator_keys if key in options}
     fit_options = {key: options.pop(key) for key in fit_keys if key in options}
+    supplied_start = "theta_start" in options
     theta_start = options.pop("theta_start", None)
     theta_range = options.pop("theta_range", None)
     num_points = options.pop("num_points", None)
@@ -529,17 +681,36 @@ def run_experiment(crop, layers, method, method_options=None):
     estimator = DiffusionEstimator(crop, selected_layers, **estimator_options)
     sweep_result = None
     if theta_range is not None:
+        sweep_options = ({"time_horizon": fit_options["time_horizon"]}
+                         if "time_horizon" in fit_options else {})
         theta_start, minimum_error = estimator.sweep_theta(
             theta_range,
             num_points,
             method=method,
             n_reps=fit_options.get("n_reps", 100),
-            random_state=fit_options.get("random_state"),
+            random_state=fit_options.get("random_state", 12),
             apply_w=fit_options.get("apply_w", True),
+            **sweep_options,
         )
         sweep_result = {"theta": theta_start.copy(), "error": float(minimum_error)}
 
     fit_result = estimator.fit_theta(theta_start, method=method, **fit_options)
+    fit_result.inputs["result_directory"] = result_directory.resolve()
+    fit_result.inputs["initialization"] = {
+        "source": "sweep" if theta_range is not None else (
+            "provided" if supplied_start else "zero_default"
+        ),
+        "sweep": None if theta_range is None else {
+            "theta_range": theta_range,
+            "num_points": num_points,
+            "selected_theta": sweep_result["theta"],
+            "selected_squared_error_years2": sweep_result["error"],
+            "evaluations": estimator.objective_function,
+        },
+    }
+    result_path = fit_result.save_json(
+        result_directory / f"{fit_result.started_at[:19].replace(':', '')}_{estimator.crop}_{fit_result.run_id}.json"
+    )
     return {
         "crop": estimator.crop,
         "layers": selected_layers,
@@ -547,6 +718,7 @@ def run_experiment(crop, layers, method, method_options=None):
         "estimator": estimator,
         "sweep_result": sweep_result,
         "fit_result": fit_result,
+        "result_path": result_path,
     }
 
 
@@ -570,7 +742,7 @@ if __name__ == "__main__":
     ]).T
     experiment = run_experiment(
         "wheat", ["prec", "sea"], "monte_carlo",
-        {"theta_range": theta_range, "num_points": 3, "n_reps": 6, "random_state": 42},
+        {"theta_range": theta_range, "num_points": 3, "n_reps": 10, "random_state": 42},
     )
     print(f"Minimum theta: {experiment['sweep_result']['theta']}")
     print(f"Minimum error: {experiment['sweep_result']['error']}")

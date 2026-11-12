@@ -1,16 +1,26 @@
 # Status
 
-Updated: 2026-11-02 09:19 +00:00 (Europe/London).
+Updated: 2026-11-12 10:11 +00:00 (Europe/London).
 
 ## Current state
+
+- MATLAB `parameters.T` is now derived automatically from crop observation years and `dt`, following `bottlenecks/src/data_prep.m`; unreached Python arrivals use T−1 for zero-based indexing. Fifteen relevant tests passed.
+
+- Python Monte Carlo now accepts MATLAB frame horizon `T`, counts unreached cells at `T`, and defaults to seed 12. NumPy and MATLAB Threefry streams still differ. Fourteen relevant tests passed; no crop fit was rerun.
+
+- MATLAB/Python fitting paths compared by code review on 2026-11-12; ranked possible differences are unverified. An external, origin-unknown Git change moved tracked `run_model.m` to untracked `matlab_comparison_scripts/` alongside `fit_model.m`.
+
+- Repository reviewed on 2026-11-12; no code or tests changed. Existing working-tree modifications remain unstaged and of unverified origin for this session.
+- Shared `ProjectNotebooks/INDEX.md` sync is pending because that directory is outside this session's writable workspace.
 
 - [Layer inspection](../tests/layer_inspection.ipynb) was moved into `tests/` by an external change; its wheat MATLAB/Python comparison cells remain intact.
 - The [development log](DEVELOPMENT_LOG.md) now includes one five-layer comparison figure. Controlled 10-year climate sampling closes only 7.4% of the precipitation MSE gap and slightly worsens temperature MSE. The earlier attribution of the gap primarily to 100-year sampling is corrected. The user confirmed that Python's hydro file handling is acceptable.
 - A read-only normalization check confirms the app standardizes each full global climate mean map to mean 0 and standard deviation 1 before cropping. The wheat-region precipitation and temperature maps have different moments; details are in the development log.
-- [Experiment runners](../diffusion_estimator.py) fit one crop/layer model or a list of layer sets with optional theta sweep. Five focused tests and a real wheat/sea data-load smoke check passed.
-- [Crop/layer experiment script](../run_crop_layer_experiments.py) has produced a [table of 18 fitted models](../results/crop_layer_experiments.md) for wheat, rice, and maize with the requested six layer sets. Three focused table tests passed. The default run uses fast marching and bounded theta; values are local fitted results.
+- [Experiment runners](../diffusion_estimator.py) fit one crop/layer model or a list of layer sets with optional theta sweep. Each `run_experiment` call now saves a versioned [optimizer result](../optimization_result.py) as JSON in `generated_data/`, with effective inputs, outputs, stopping status, and provenance. Six focused runner tests and three crop/layer table tests passed; a real wheat intercept-only fast-marching fit saved and reloaded its result.
+- [Crop/layer experiment script](../run_crop_layer_experiments.py) has produced a [table of 18 fitted models](../results/crop_layer_experiments.md) for wheat, rice, and maize with the requested six layer sets. Its uncommitted, origin-unknown default method change sets Monte Carlo; values in the existing table are earlier local fits.
 - [README.md](../README.md) now describes the estimator API and how to run single, batch, and prepared crop experiments.
-- Git branch `main`, HEAD `0984299b8cad8d64473615db45c4918ae9f513ee` (2026-10-28 commit of unknown origin, detected this session). The working tree was clean before the README and project-notebook edits.
+- Git branch `main`, HEAD `4bf607126279c7efdef2cd0a955b4f6a20e7a498` (`added readme`, 2026-11-02 10:23 +00:00; external commit detected). `run_crop_layer_experiments.py` has an uncommitted change of unknown origin setting the default method to Monte Carlo; Codex did not modify it.
+- `fit_theta` returns a serializable result while preserving `.x`, `.fun`, and `.nit` access. Its success flag now reflects the actual termination reason. Generated JSON files are ignored by Git; notebook and code changes remain unstaged.
 - The application loads standardized HDF5 crop and environmental layers and provides fast-marching and Monte Carlo arrival-time methods. Source and processing details: [DATA_PROCESSING.md](../processing/DATA_PROCESSING.md).
 - No approved scientific findings are recorded. The comparison and crop-fit table remain exploratory.
 

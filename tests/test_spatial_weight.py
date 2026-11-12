@@ -5,13 +5,30 @@ import unittest
 
 import numpy as np
 
-from diffusion_estimator import DiffusionEstimator
+from diffusion_estimator import DiffusionEstimator, matlab_time_horizon
 from fast_marching import fast_marching
 from monte_carlo import calculate_simulation_times_and_error, simulate_arrival_times
 
 
 class SpatialWeightTests(unittest.TestCase):
     """Exercise the cosine weight with small grids whose outcomes are explicit."""
+
+    def test_monte_carlo_matlab_horizon_counts_unreached_repetitions(self) -> None:
+        speed = np.zeros((1, 2))
+        starts = [(0, 0, 0)]
+        times = simulate_arrival_times(speed, starts, 2, time_horizon=4, apply_w=False)
+        np.testing.assert_array_equal(times, [[0.0, 3.0]])
+        dataset = np.array([[0, 1, 2]])
+        _, error = calculate_simulation_times_and_error(
+            speed, dataset, starts, 2, dt=40, time_horizon=4, apply_w=False
+        )
+        self.assertEqual(error, 1600.0)
+        with self.assertRaises(ValueError):
+            simulate_arrival_times(speed, starts, 1, time_horizon=0)
+
+    def test_matlab_horizon_rounds_observation_window_outward(self) -> None:
+        # floor(-101/40)*40=-120; ceil(79/40)*40+1000=1080.
+        self.assertEqual(matlab_time_horizon([-101, 79], 40), 31)
 
     def test_monte_carlo_weight_changes_fixed_random_draw(self) -> None:
         """Apply MATLAB's W to a random draw at 60 degrees by default."""

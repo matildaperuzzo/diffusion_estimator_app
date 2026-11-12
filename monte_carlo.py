@@ -22,24 +22,32 @@ def simulate_arrival_times(
     speed: np.ndarray,
     start_points: list[tuple[float, float, float]],
     n_reps: int,
-    random_state: int | np.random.Generator | None = None,
+    random_state: int | np.random.Generator | None = 12,
     *,
     apply_w: bool = True,
     latitudes: np.ndarray | None = None,
     W: np.ndarray | None = None,
+    time_horizon: int | None = None,
 ) -> np.ndarray:
     """Average first-adoption times over Monte Carlo front simulations.
 
     ``speed`` is interpreted as a cell-wise adoption probability. By default,
     latitude weights reproduce MATLAB's ``rand * W <= speed`` comparison.
     Standalone callers supply row latitudes or an explicit W. Unreached cells
-    retain ``np.inf`` in each repetition and in the returned average.
+    retain ``np.inf`` in each repetition and in the returned average. With
+    ``time_horizon=T``, run MATLAB's T-frame simulation. Arrival times use
+    zero-based frames, so observations not reached by frame T arrive at T-1.
     """
     # Validate the simulation count before allocating potentially large arrays.
     if n_reps <= 0:
         raise ValueError("n_reps must be a positive integer.")
     if int(n_reps) != n_reps:
         raise ValueError("n_reps must be an integer.")
+    if time_horizon is not None and (
+        isinstance(time_horizon, bool) or not isinstance(time_horizon, (int, np.integer))
+        or time_horizon < 1
+    ):
+        raise ValueError("time_horizon must be a positive integer number of frames.")
 
     # Convert the speed field to floating point probabilities and validate it.
     probabilities = np.asarray(speed, dtype=float)
@@ -64,6 +72,9 @@ def simulate_arrival_times(
     time_sum = np.zeros(shape, dtype=float)
     time_count = np.zeros(shape, dtype=np.int64)
     for _ in range(int(n_reps)):
+        # MATLAB allocates all T random frames before each repetition, including
+        # the unused first frame. Match its draw count and frame indexing.
+        frame_draws = rng.random(shape + (time_horizon,)) if time_horizon is not None else None
         # Mark all supplied start points active at simulation time zero.
         active = np.zeros(shape, dtype=bool)
         arrival = np.full(shape, np.inf, dtype=float)
@@ -72,16 +83,22 @@ def simulate_arrival_times(
             arrival[row, column] = 0.0
 
         # Advance one discrete timestep until the frontier is exhausted.
-        for timestep in range(1, shape[0] * shape[1] + 1):
+        last_step = time_horizon - 1 if time_horizon is not None else shape[0] * shape[1]
+        for timestep in range(1, last_step + 1):
             frontier = _frontier(active)
             if not np.any(frontier):
-                break
-            adopted = frontier & (rng.random(shape) <= probabilities)
+                if time_horizon is None:
+                    break
+                continue
+            draws = frame_draws[:, :, timestep] if frame_draws is not None else rng.random(shape)
+            adopted = frontier & (draws <= probabilities)
             if not np.any(adopted):
                 continue
             active[adopted] = True
             arrival[adopted] = timestep
 
+        if time_horizon is not None:
+            arrival[~np.isfinite(arrival)] = time_horizon - 1
         reached = np.isfinite(arrival)
         time_sum[reached] += arrival[reached]
         time_count[reached] += 1
@@ -99,11 +116,12 @@ def calculate_simulation_times_and_error(
     start_points: list[tuple[float, float, float]],
     n_reps: int,
     dt: float = 1.0,
-    random_state: int | np.random.Generator | None = None,
+    random_state: int | np.random.Generator | None = 12,
     *,
     apply_w: bool = True,
     latitudes: np.ndarray | None = None,
     W: np.ndarray | None = None,
+    time_horizon: int | None = None,
 ) -> tuple[np.ndarray, float]:
     """Calculate averaged simulation times and their mean squared error."""
     # Run the stochastic solver once, then compare only the observed data cells.
@@ -115,6 +133,7 @@ def calculate_simulation_times_and_error(
         apply_w=apply_w,
         latitudes=latitudes,
         W=W,
+        time_horizon=time_horizon,
     )
     observations = np.asarray(dataset)
     indices = observations[:, :2].astype(int)
