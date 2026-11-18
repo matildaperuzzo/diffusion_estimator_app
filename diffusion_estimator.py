@@ -13,6 +13,7 @@ except ImportError:
     tqdm = None
 from pathlib import Path
 from scipy.io import loadmat
+from scipy.optimize import Bounds, minimize
 import os
 
 from optimization_result import OptimizationResult
@@ -32,14 +33,21 @@ LAYER_FILE_NAMES = {
 }
 
 
-def matlab_time_horizon(years, dt):
-    """Return data_prep.m's inclusive frame count for observation years."""
+def matlab_time_horizon(years, dt, extra_steps=None):
+    """Return the inclusive frame count, optionally extending observations by steps."""
     years = np.asarray(years, dtype=float)
     if years.size == 0 or not np.all(np.isfinite(years)) or not np.isfinite(dt) or dt <= 0:
         raise ValueError("years must be nonempty and finite, and dt must be positive.")
+    if extra_steps is not None and (
+        isinstance(extra_steps, bool) or not isinstance(extra_steps, (int, np.integer))
+        or extra_steps < 0
+    ):
+        raise ValueError("extra_steps must be a non-negative integer.")
     start_time = np.floor(years.min() / dt) * dt
-    end_time = np.ceil(years.max() / dt) * dt + 1000
-    return int(np.floor((end_time - start_time) / dt + 1 + 0.5))
+    end_time = np.ceil(years.max() / dt) * dt
+    if extra_steps is None:
+        end_time += 1000
+    return int(np.floor((end_time - start_time) / dt + 1 + 0.5)) + (extra_steps or 0)
 
 
 def _array_identity(values):
@@ -412,7 +420,7 @@ class DiffusionEstimator(object):
         random_state=12, apply_w=True, time_horizon=None
     ):
         """
-        Fit the theta parameters using projected gradient descent.
+        Fit theta using raw MSE and a centered finite-difference gradient.
 
         Parameters:
         - theta_start: Initial guess for the theta parameters.
@@ -423,11 +431,11 @@ class DiffusionEstimator(object):
         """
         started_at = datetime.now(timezone.utc).isoformat()
         start_clock = perf_counter()
-        nfev = 0
+        objective_evaluations = 0
 
         def objective(theta):
-            nonlocal nfev
-            nfev += 1
+            nonlocal objective_evaluations
+            objective_evaluations += 1
             speed = self.build_speed(theta)
             # Evaluate the objective with the selected numerical solver.
             arrival_options = {"time_horizon": time_horizon} if time_horizon is not None else {}
@@ -451,30 +459,24 @@ class DiffusionEstimator(object):
         else:
             lower_bounds = theta_bounds[:, 0]
             upper_bounds = theta_bounds[:, 1]
+        if (lower_bounds.shape != theta.shape or upper_bounds.shape != theta.shape
+                or np.any(lower_bounds > upper_bounds)):
+            raise ValueError("theta_bounds must give an ordered lower and upper bound per coefficient.")
+        if np.any(theta < lower_bounds) or np.any(theta > upper_bounds):
+            raise ValueError("theta_start must lie within theta_bounds.")
 
-        def project(values):
-            return np.minimum(np.maximum(values, lower_bounds), upper_bounds)
+        gradient_step = 0.05
+        max_iter = 10000
 
-        gradient_epsilon = 1e-4
-
-        def finite_difference_gradient(values):
-            gradient = np.zeros_like(values, dtype=float)
+        def gradient(values):
+            result = np.empty_like(values)
             for index in range(values.size):
-                step = np.zeros_like(values, dtype=float)
-                step[index] = gradient_epsilon
-                forward = objective(project(values + step))
-                backward = objective(project(values - step))
-                gradient[index] = (forward - backward) / (2 * gradient_epsilon)
-            return gradient
+                step = np.zeros_like(values)
+                step[index] = gradient_step
+                result[index] = (objective(values + step) - objective(values - step)) / (2 * gradient_step)
+            return result
 
-        max_iter = 10
-        initial_learning_rate = 0.05
-        min_learning_rate = 1e-8
-        backtrack_factor = 0.5
-        armijo_c = 1e-8
-        tolerance = 1e5
         history = []
-        status = "max_iterations"
 
         used_layers = self.layers or ["sea"]
         recorded_random_state = (
@@ -512,106 +514,33 @@ class DiffusionEstimator(object):
                                  else time_horizon),
             },
             "optimizer": {
-                "name": "projected_gradient_descent", "theta_start": theta_start,
+                "name": "scipy_slsqp", "theta_start": theta_start,
                 "theta_bounds": np.column_stack((lower_bounds, upper_bounds)),
-                "max_iter": max_iter, "initial_learning_rate": initial_learning_rate,
-                "min_learning_rate": min_learning_rate, "backtrack_factor": backtrack_factor,
-                "armijo_c": armijo_c, "gradient_tolerance": tolerance,
-                "gradient_epsilon": gradient_epsilon,
+                "max_iter": max_iter, "function_tolerance": 1e-5,
+                "gradient_step": gradient_step, "hessian": None,
             },
             "initialization": {"source": "direct", "sweep": None},
         }
 
-        for iteration in range(1, max_iter + 1):
-            error = objective(theta)
-            gradient = finite_difference_gradient(theta)
-            grad_norm = np.linalg.norm(gradient)
+        initial_error = objective(theta)
 
-            if not np.isfinite(error) or not np.all(np.isfinite(gradient)):
-                status = "nonfinite_objective"
-                history.append({
-                    "iteration": iteration, "theta": theta.copy(), "error": float(error),
-                    "gradient": gradient.copy(), "gradient_norm": float(grad_norm),
-                    "learning_rate": 0.0, "accepted": False,
-                })
-                break
-
-            if grad_norm < tolerance:
-                status = "gradient_tolerance"
-                history.append({
-                    "iteration": iteration,
-                    "theta": theta.copy(),
-                    "error": float(error),
-                    "gradient": gradient.copy(),
-                    "gradient_norm": float(grad_norm),
-                    "learning_rate": 0.0,
-                    "accepted": True,
-                })
-                print(
-                    f"Iteration {iteration:03d} | error={error:.6f} | "
-                    f"grad_norm={grad_norm:.6f} | lr=0.0 | accepted=True | theta={theta}"
-                )
-                break
-
-            learning_rate = initial_learning_rate
-            accepted = False
-            candidate_theta = theta.copy()
-            candidate_error = error
-
-            # Backtracking line search with projection to avoid bouncing on bounds.
-            while learning_rate >= min_learning_rate:
-                trial_theta = project(theta - learning_rate * gradient)
-
-                # If projection keeps us at the same point, shrink step and retry.
-                if np.allclose(trial_theta, theta, rtol=0.0, atol=1e-12):
-                    learning_rate *= backtrack_factor
-                    continue
-
-                trial_error = objective(trial_theta)
-                sufficient_decrease = error - armijo_c * learning_rate * (grad_norm ** 2)
-
-                if trial_error <= sufficient_decrease:
-                    candidate_theta = trial_theta
-                    candidate_error = trial_error
-                    accepted = True
-                    break
-
-                learning_rate *= backtrack_factor
-
+        def record_iteration(values):
             history.append({
-                "iteration": iteration,
-                "theta": theta.copy(),
-                "error": float(error),
-                "gradient": gradient.copy(),
-                "gradient_norm": float(grad_norm),
-                "learning_rate": float(learning_rate),
-                "accepted": bool(accepted),
-                "next_error": float(candidate_error),
+                "iteration": len(history) + 1, "theta": np.array(values).copy(),
             })
 
-            print(
-                f"Iteration {iteration:03d} | error={error:.6f} | "
-                f"grad_norm={grad_norm:.6f} | lr={learning_rate:.3e} | "
-                f"accepted={accepted} | theta={theta}"
-            )
-
-            if not accepted:
-                status = "line_search_failed"
-                print("Stopping: line search could not find a decreasing step.")
-                break
-
-            theta = candidate_theta
-
-        final_error = objective(theta)
+        result = minimize(
+            objective, theta, method="SLSQP", jac=gradient,
+            bounds=Bounds(lower_bounds, upper_bounds), callback=record_iteration,
+            options={"maxiter": max_iter, "ftol": 1e-5},
+        )
+        theta = np.asarray(result.x, dtype=float)
+        final_error = float(result.fun)
+        status = {0: "converged", 9: "max_iterations"}.get(
+            int(result.status), "optimizer_stopped"
+        )
         print(f"Final theta: {theta}")
         print(f"Final error: {final_error:.6f}")
-
-        messages = {
-            "gradient_tolerance": "Gradient tolerance reached.",
-            "max_iterations": "Maximum iterations reached.",
-            "line_search_failed": "Line search could not find a decreasing step.",
-            "nonfinite_objective": "Objective or gradient became non-finite.",
-        }
         fit_result = OptimizationResult(
             run_id=uuid4().hex,
             started_at=started_at,
@@ -619,10 +548,11 @@ class DiffusionEstimator(object):
             inputs=inputs,
             outputs={
                 "theta": theta.copy(), "squared_error_years2": float(final_error),
-                "initial_squared_error_years2": history[0]["error"],
-                "iterations": len(history), "objective_evaluations": nfev,
-                "status": status, "success": status == "gradient_tolerance",
-                "message": messages[status], "history": history,
+                "initial_squared_error_years2": float(initial_error),
+                "iterations": int(result.nit),
+                "objective_evaluations": objective_evaluations,
+                "status": status, "success": bool(result.success),
+                "message": str(result.message), "history": history,
                 "duration_seconds": perf_counter() - start_clock,
             },
             provenance=_git_provenance(),
@@ -639,7 +569,7 @@ def run_experiment(crop, layers, method, method_options=None):
     ``method`` is ``"fast_marching"`` or ``"monte_carlo"``. Options may include
     estimator arguments (``dataset``, ``dt``, ``delta``, ``buffer_size_rad``,
     ``data_directory``), fit arguments (``theta_start``, ``theta_bounds``,
-    ``n_reps``, ``random_state``, ``apply_w``, ``time_horizon``), and optionally both
+    ``n_reps``, ``random_state``, ``apply_w``, ``time_horizon`` or ``extra_steps``), and optionally both
     ``theta_range`` and ``num_points`` for a sweep before fitting. Each fit is
     saved as JSON under ``generated_data`` (or ``result_directory``).
     """
@@ -655,6 +585,9 @@ def run_experiment(crop, layers, method, method_options=None):
     fit_keys = ("theta_bounds", "n_reps", "random_state", "apply_w", "time_horizon")
     estimator_options = {key: options.pop(key) for key in estimator_keys if key in options}
     fit_options = {key: options.pop(key) for key in fit_keys if key in options}
+    extra_steps = options.pop("extra_steps", None)
+    if extra_steps is not None and "time_horizon" in fit_options:
+        raise ValueError("Choose either extra_steps or time_horizon.")
     supplied_start = "theta_start" in options
     theta_start = options.pop("theta_start", None)
     theta_range = options.pop("theta_range", None)
@@ -679,6 +612,10 @@ def run_experiment(crop, layers, method, method_options=None):
             raise ValueError("theta_start must have one finite intercept and one coefficient per layer.")
 
     estimator = DiffusionEstimator(crop, selected_layers, **estimator_options)
+    if extra_steps is not None:
+        fit_options["time_horizon"] = matlab_time_horizon(
+            estimator.crop_points["time"], estimator.dt, extra_steps=extra_steps
+        )
     sweep_result = None
     if theta_range is not None:
         sweep_options = ({"time_horizon": fit_options["time_horizon"]}
@@ -738,11 +675,10 @@ if __name__ == "__main__":
     theta_range = np.array([
         (-2, 2),
         (-5, 5),
-        (-5, 5),
     ]).T
     experiment = run_experiment(
-        "wheat", ["prec", "sea"], "monte_carlo",
-        {"theta_range": theta_range, "num_points": 3, "n_reps": 10, "random_state": 42},
+        "maize", ["sea"], "monte_carlo",
+        {"theta_range": theta_range, "num_points": 11, "n_reps": 20, "random_state": 42},
     )
     print(f"Minimum theta: {experiment['sweep_result']['theta']}")
     print(f"Minimum error: {experiment['sweep_result']['error']}")

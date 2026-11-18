@@ -16,7 +16,7 @@ class CropLayerExperimentTests(unittest.TestCase):
         def fake_run(crop, layer_sets, method, options):
             self.assertEqual(method, "fast_marching")
             self.assertTrue(options["apply_w"])
-            self.assertEqual(options["num_points"], 3)
+            self.assertEqual(options["num_points"], 11)
             self.assertEqual(options["theta_range"].shape, (2, len(layer_sets[0]) + 1))
             return [
                 {"layers": list(layers), "fit_result": SimpleNamespace(

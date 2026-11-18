@@ -1,5 +1,46 @@
 # Development log
 
+## 2026-11-18 10:08 +00:00 — Working-tree review for commit message (Codex)
+
+- Reviewed tracked and untracked Git changes without staging or committing. The diff includes the SLSQP/raw-MSE optimizer, configurable crop CLI with extra steps, objective plot script, tests, documentation, and notebook updates.
+- An origin-unknown replacement of `results/crop_layer_experiments.md` records 18 Monte Carlo rows using 20 repetitions, seed 12, and 11 sweep points; `tests/layer_inspection.ipynb` also changes a saved wheat example to sea-only with 10 repetitions. No run or scientific interpretation was made in this review.
+
+## 2026-11-18 10:02 +00:00 — Extra simulation steps option (Codex)
+
+- Changed the new CLI from `--time-horizon` to `--extra-steps`. The count extends the last observation's rounded frame; zero ends there. The existing default 1,000-year extension remains when the option is omitted.
+- Extended `matlab_time_horizon` and `run_experiment` to convert the extra count into the total horizon used for Monte Carlo sweep and fit. Explicit `time_horizon` remains available through the Python API and cannot be combined with `extra_steps`. No fit was run because `h5py` is unavailable in the current Python environment. Shared dashboard sync is pending outside the writable workspace.
+- The new script's `--help` completed successfully. An intervening, origin-unknown edit changed its default `--sweep-points` from 3 to 11; Codex preserved the new value.
+
+## 2026-11-18 09:41 +00:00 — Configurable crop/layer CLI (Codex)
+
+- Added [run_experiments.py](../run_experiments.py) to fit one crop and ordered layer list selected through `--crop` and `--layers`. It keeps the existing solver, sweep, bounds, and output controls, writes a per-model Markdown result, and retains the optimizer JSON from `run_experiment`.
+- Read its `--help` output successfully. No model fit or test suite was run; this environment lacks `h5py`. Existing unrelated working-tree changes were left intact. Shared dashboard sync remains pending because its path is outside the writable workspace.
+
+## 2026-11-12 15:39 +00:00 — Raw objective and six-evaluation gradient (Codex)
+
+- At the user's request, removed ±0.005 smoothing and all explicit Hessian calculations from `fit_theta`. Each objective call now runs one raw MSE; the centered gradient at step 0.05 runs two MSE evaluations per coefficient (six for three coefficients). Replaced trust-constr with SciPy SLSQP to retain optional coefficient bounds without supplying a Hessian. Updated result metadata, README, and experiment-table description.
+- Thirteen focused optimizer and spatial-weight tests passed, including a mock check of exactly one objective and six gradient evaluations for three coefficients. A broader run had one unrelated failure: an existing, origin-unknown modification to `tests/test_crop_layer_experiments.py` expects 11 sweep points while the script defaults to 3. `git diff --check` found no whitespace errors. No full Monte Carlo crop fit was run. Existing external working-tree changes were preserved; all notebook changes remain unstaged and shared dashboard sync is pending.
+
+## 2026-11-12 12:03 +00:00 — MATLAB-style fitted objective and trust-region optimizer (Codex)
+
+- Replaced projected gradient descent in `DiffusionEstimator.fit_theta` with SciPy trust-constr, using MATLAB `optimize_model_mean.m`'s mean of raw MSE at theta and ±0.005 per coefficient. Added central finite-difference gradient and Hessian at step 0.05, up to 10,000 optimizer iterations, and optional bounds; omitting bounds permits an unbounded fit. MATLAB's 1,000-fold gradient-only scaling was not copied because it conflicts with the objective and Hessian.
+- The result now records both the final raw MSE (`.fun`) and optimized smoothed objective, iteration history, stopping status, and evaluation counts. Updated README, generated table description, and focused tests. Fifteen relevant tests passed, including bounded and unbounded quadratic fits; `git diff --check` found no whitespace errors. No full maize fit was run, so its behavior under the new optimizer remains unmeasured. Existing notebook and plot-script working-tree changes were preserved; nothing was staged or committed. Shared dashboard sync remains pending outside the writable workspace.
+
+## 2026-11-12 11:56 +00:00 — Maize/sea fit stopping diagnosis (Codex)
+
+- Read the latest local ignored maize optimizer record `generated_data/2026-11-12T115150_maize_570ba84e8f444fc48b107d2bd2231866.json`. It used Monte Carlo (100 repetitions, seed 12, T=167), a coarse sweep start `[-2, 5]`, and bounds `[-5, 5]`. The fit returned the same theta and MSE `1,478,519.5180676328` years squared after one iteration with `line_search_failed`; recorded gradient was `[179048.30917948857, 0]`, with 29 objective evaluations. The intercept at -2 is inside the fit bounds, though at the sweep edge. These are diagnostic facts, not scientific interpretation.
+- Compared `bottlenecks/src/optimize_model_mean.m`, `calculateGradient.m`, `calculateHessian.m`, and `sweep.m` with Python `fit_theta`. MATLAB uses an unbounded trust-region optimizer and an objective averaging the center and ±0.005 perturbations per coefficient; Python minimizes raw MSE with projected gradient descent, 10-iteration maximum, and 1e-4 finite differences. No decreasing feasible step was accepted by the Python line search; the cause was not isolated. No code or scientific entry was changed. Notebook changes remain unstaged; shared dashboard sync is pending.
+
+## 2026-11-12 10:39 +00:00 — Objective MSE discrepancy traced (Codex)
+
+- Compared the wheat/sea notebook cell at theta `[-1.6, 5]` with `tests/plot_objective_function.py`. The notebook calls Monte Carlo with 10 repetitions and seed 3; the plotting script defaults to fast marching (and its Monte Carlo defaults are 100 repetitions and seed 12).
+- Read-only evaluation with the current code at the same theta gave fast-marching MSE `1,529,409.2593215813` years squared and Monte Carlo (10 repetitions, seed 3) MSE `2,341,702.81938326` years squared. The latter agrees with the notebook's saved `2,341,702.819383` to shown precision. No code or scientific entry changed; notebook changes remain unstaged and shared dashboard sync is pending.
+
+## 2026-11-12 10:31 +00:00 — Two-coefficient objective plot script (Codex)
+
+- Added `tests/plot_objective_function.py` to sweep the intercept and one named layer coefficient for a selected crop, then save a 2D mean-squared-error plot with the lowest finite sampled point marked. CLI options cover coefficient ranges, grid resolution, solver, Monte Carlo settings, grid/time steps, latitude weighting, and output path.
+- Smoke-ran wheat + sea with fast marching at 3 points per axis. The script saved `generated_data/objective_wheat_sea.png` (Git-ignored); visual inspection showed the sampled surface and marker. No scientific interpretation is attached to the coarse sample. Pre-existing, origin-unknown `tests/layer_inspection.ipynb` modification was left untouched. Notebook changes remain unstaged; shared dashboard sync remains pending outside the writable workspace.
+
 ## 2026-11-12 10:11 +00:00 — MATLAB horizon derived automatically (Codex)
 
 - Read `bottlenecks/src/data_prep.m` and `calculate_times.m` without changing that repository. MATLAB sets `start_time=floor(min(years)/dt)*dt`, `end_time=ceil(max(years)/dt)*dt+1000`, and `T=round((end_time-start_time)/dt+1)`. `calculate_times.m` returns one-based arrival frames, using T for unreached observations.

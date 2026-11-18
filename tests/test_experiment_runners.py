@@ -4,6 +4,7 @@ import unittest
 import json
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -129,11 +130,19 @@ class ExperimentRunnerTests(unittest.TestCase):
         saved_path = result.save_json(root / "run.json")
         loaded = OptimizationResult.from_json(saved_path)
         self.assertTrue(loaded.success)
-        self.assertEqual(loaded.outputs["status"], "gradient_tolerance")
-        self.assertEqual(loaded.nfev, 4)
+        self.assertEqual(loaded.outputs["status"], "converged")
+        self.assertGreater(loaded.nfev, 4)
+        self.assertEqual(loaded.inputs["optimizer"]["name"], "scipy_slsqp")
+        self.assertAlmostEqual(loaded.x[0], 1.0, places=3)
+        self.assertAlmostEqual(loaded.fun, 0.0, places=6)
+        self.assertNotIn("smoothed_objective_years2", loaded.outputs)
+        self.assertIsNone(loaded.inputs["optimizer"]["hessian"])
         self.assertEqual(loaded.inputs["optimizer"]["theta_bounds"], [[-2.0, 2.0]])
         self.assertEqual(loaded.inputs["data"]["dataset"]["shape"], [1, 3])
-        np.testing.assert_array_equal(loaded.x, [0.0])
+        unbounded = estimator.fit_theta([0.0])
+        self.assertTrue(unbounded.success)
+        self.assertAlmostEqual(unbounded.x[0], 1.0, places=5)
+        self.assertTrue(np.isneginf(unbounded.inputs["optimizer"]["theta_bounds"][0][0]))
 
     @patch("diffusion_estimator.DiffusionEstimator")
     def test_invalid_options_fail_before_loading_data(self, estimator_class):
@@ -159,6 +168,48 @@ class ExperimentRunnerTests(unittest.TestCase):
 
         np.testing.assert_array_equal(theta, [1.0])
         self.assertEqual(error, 1.0)
+
+    def test_three_coefficient_gradient_uses_six_raw_evaluations(self):
+        root = self.output
+        (root / "crop").mkdir()
+        (root / "layers").mkdir()
+        (root / "crop" / "wheat.h5").write_bytes(b"crop")
+        for name in ("sea", "prec"):
+            (root / "layers" / f"{name}.h5").write_bytes(name.encode())
+        estimator = DiffusionEstimator.__new__(DiffusionEstimator)
+        estimator.crop, estimator.layers = "wheat", ["sea", "prec"]
+        estimator.dt, estimator.delta, estimator.buffer_size_rad = 40, 0.5, 0.0
+        estimator.data_directory, estimator.dataset_is_override = root, False
+        estimator.dataset = np.array([[0.0, 0.0, 0.0]])
+        estimator.layer_data = {name: np.zeros((1, 1)) for name in estimator.layers}
+        estimator.start_points = np.array([[0.0, 0.0, 0.0]])
+        estimator.grid_shape = (1, 1)
+        estimator.latitude_extent = estimator.longitude_extent = (0.0, 1.0)
+        estimator.year_extent = (-100.0, 0.0)
+        estimator.build_speed = lambda theta: np.array([[theta.sum()]])
+        estimator.get_arrival_times = lambda speed, **kwargs: speed
+        estimator.calculate_error = lambda times: float(times[0, 0] ** 2)
+
+        def inspect_optimizer(fun, start, *, jac, **kwargs):
+            self.assertNotIn("hess", kwargs)
+            before = calls[0]
+            value = fun(start)
+            self.assertEqual(calls[0] - before, 1)
+            before = calls[0]
+            jac(start)
+            self.assertEqual(calls[0] - before, 6)
+            return SimpleNamespace(x=start, fun=value, status=0, success=True,
+                                   message="checked", nit=0)
+
+        calls = [0]
+        original_error = estimator.calculate_error
+        def counted_error(times):
+            calls[0] += 1
+            return original_error(times)
+        estimator.calculate_error = counted_error
+        with patch.object(estimator_module, "minimize", side_effect=inspect_optimizer):
+            result = estimator.fit_theta([0.0, 0.0, 0.0])
+        self.assertEqual(result.nfev, 8)  # Initial value, then 1 + 6 in the check.
 
 
 if __name__ == "__main__":

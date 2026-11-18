@@ -116,7 +116,7 @@ def format_table(rows, method, dt, delta, apply_w, n_reps, seed, theta_limit, sw
         "",
         details,
         "Theta values are listed as intercept, then coefficients for the named layers. "
-        "Values come from projected gradient descent after a coarse theta sweep; "
+        "Values come from SLSQP fitting after a coarse theta sweep; "
         "a nested simpler fit is kept if it scores better. A global optimum is not guaranteed.",
         "",
         "| Crop | Layers | Best theta (fit) | Best squared error (years²) |",

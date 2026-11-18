@@ -1,8 +1,22 @@
 # Status
 
-Updated: 2026-11-12 10:11 +00:00 (Europe/London).
+Updated: 2026-11-18 10:08 +00:00 (Europe/London).
 
 ## Current state
+
+- Git review found an origin-unknown replacement of the 18-row results table with Monte Carlo, 20 repetitions, seed 12, and 11 sweep points, plus a changed wheat notebook example and crop-table test expectation. The table was not regenerated or scientifically interpreted in this review.
+
+- Added `run_experiments.py` for one user-selected crop and ordered layer set, with the existing solver and sweep options. Its `--extra-steps` option specifies Monte Carlo frames beyond the last observed frame; omitting it retains the 1,000-year extension. An intervening edit of unknown origin changed this script's default sweep count from 3 to 11; it was preserved. No fit was run; the current Python environment lacks `h5py`.
+
+- `fit_theta` now uses one raw MSE per objective call and a centered 0.05-step gradient (six extra MSE calls for three coefficients), with no explicit Hessian. SLSQP supports optional bounds. Thirteen focused tests passed; a separate externally modified crop-table test expects 11 sweep points versus the script's default 3.
+
+- `fit_theta` now minimizes MATLAB's locally averaged objective using SciPy trust-constr with finite-difference gradient and Hessian; raw and smoothed errors are saved separately. Fifteen focused tests passed, including bounded and unbounded fits. A full maize fit has not been rerun.
+
+- Latest local maize/sea fit stopped after one iteration at sweep corner `[-2, 5]` with `line_search_failed`; the intercept is inside its optimizer bound. Python descent on raw MSE differs from MATLAB's unbounded trust-region fit on a locally averaged objective. No code change was made during diagnosis.
+
+- The notebook/plot MSE difference at wheat/sea theta `[-1.6, 5]` was traced to solver settings: Monte Carlo (10 repetitions, seed 3) versus the plot script's fast-marching default. Current evaluations reproduced `2,341,702.819383` and `1,529,409.259322` years squared respectively.
+
+- Added `tests/plot_objective_function.py` for a crop plus one layer; a coarse wheat/sea fast-marching smoke run saved an ignored plot in `generated_data/`. Existing `tests/layer_inspection.ipynb` changes are of unknown origin and were not touched.
 
 - MATLAB `parameters.T` is now derived automatically from crop observation years and `dt`, following `bottlenecks/src/data_prep.m`; unreached Python arrivals use T−1 for zero-based indexing. Fifteen relevant tests passed.
 

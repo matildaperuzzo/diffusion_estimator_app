@@ -9,7 +9,7 @@
 - `build_speed(theta)` applies a sigmoid to the weighted layer sum, producing a speed map.
 - `get_arrival_times(speed, method=...)` propagates from the earliest crop observation using `fast_marching` or `monte_carlo`. Both apply the cosine-latitude weight by default (`apply_w=True`).
 - `calculate_error(arrival_times)` returns mean squared arrival-time error in years squared.
-- `sweep_theta(...)` searches a parameter grid; `fit_theta(...)` refines a starting theta with projected gradient descent. Fitted values are local results, not guaranteed global minima.
+- `sweep_theta(...)` searches a parameter grid; `fit_theta(...)` refines a starting theta with SLSQP on the raw mean squared error. Its centered finite-difference gradient uses a 0.05 coefficient step (two extra model evaluations per coefficient); no Hessian is calculated or supplied. Optional `theta_bounds` constrain the fit. The saved `.fun` is the raw error at fitted theta. Fitted values are local results, not guaranteed global minima.
 
 The climate layers are averaged over the crop's observed-year window when loaded. See [data processing](processing/DATA_PROCESSING.md) for layer sources and normalization details.
 
